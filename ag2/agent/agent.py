@@ -1,4 +1,4 @@
-"""Core async Agent and AgentReply conversation continuation loop."""
+"""Core async Agent and AgentReply conversation and tool-calling loop."""
 
 from __future__ import annotations
 
@@ -13,11 +13,18 @@ from opentelemetry import trace
 from pydantic import TypeAdapter, ValidationError
 
 from ag2.config.models import ModelConfig
-from ag2.events.messages import ChatMessage, Usage
-from ag2.events.models import ErrorEvent, MessageEvent, TextEvent
+from ag2.events.messages import ChatMessage, ToolCall, Usage
+from ag2.events.models import (
+    ErrorEvent,
+    MessageEvent,
+    TextEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from ag2.events.stream import MemoryStream
 from ag2.providers.base import ModelClient, ResponseFormat, StructuredOutputError, ToolSpec
 from ag2.providers.factory import create_model_client
+from ag2.tools.tool import MaxToolRoundsError, Tool, index_tools, serialize_tool_result
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer("ag2.agent")
@@ -29,6 +36,14 @@ def _coerce_user_message(prompt: str | ChatMessage) -> ChatMessage:
     if isinstance(prompt, ChatMessage):
         return prompt
     return ChatMessage(role="user", content=prompt)
+
+
+def _add_usage(acc: Usage, delta: Usage) -> Usage:
+    return Usage(
+        prompt_tokens=acc.prompt_tokens + delta.prompt_tokens,
+        completion_tokens=acc.completion_tokens + delta.completion_tokens,
+        total_tokens=acc.total_tokens + delta.total_tokens,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +66,8 @@ class AgentReply(Generic[T]):
         prompt: str | ChatMessage,
         *,
         output_type: type[T],
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[T]: ...
 
     @overload
@@ -59,6 +76,8 @@ class AgentReply(Generic[T]):
         prompt: str | ChatMessage,
         *,
         output_type: None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[Any]: ...
 
     async def ask(
@@ -66,6 +85,8 @@ class AgentReply(Generic[T]):
         prompt: str | ChatMessage,
         *,
         output_type: type[Any] | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[Any]:
         """Continue this exact conversation thread with a follow-up prompt."""
         return await self.agent._run_turn(
@@ -74,11 +95,13 @@ class AgentReply(Generic[T]):
             output_type=output_type,
             run_id=self.run_id,
             include_system=False,
+            tools=tools,
+            max_tool_rounds=max_tool_rounds,
         )
 
 
 class Agent:
-    """Async protocol-driven conversational agent."""
+    """Async protocol-driven conversational agent with tool-calling support."""
 
     def __init__(
         self,
@@ -88,10 +111,18 @@ class Agent:
         system_message: str | None = None,
         stream: MemoryStream | None = None,
         output_type: type[Any] | None = None,
+        tools: Sequence[Tool] = (),
+        max_tool_rounds: int = 10,
     ) -> None:
+        if max_tool_rounds < 1:
+            raise ValueError("max_tool_rounds must be >= 1")
+
         self.name = name
         self.system_message = system_message
         self.default_output_type = output_type
+        self.tools = tuple(tools)
+        index_tools(self.tools)
+        self.max_tool_rounds = max_tool_rounds
 
         if isinstance(model, ModelConfig):
             self._client: ModelClient = create_model_client(model)
@@ -115,6 +146,8 @@ class Agent:
         messages: Sequence[ChatMessage] | None = None,
         output_type: type[T],
         run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[T]: ...
 
     @overload
@@ -125,6 +158,8 @@ class Agent:
         messages: Sequence[ChatMessage] | None = None,
         output_type: None = None,
         run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[Any]: ...
 
     async def ask(
@@ -134,6 +169,8 @@ class Agent:
         messages: Sequence[ChatMessage] | None = None,
         output_type: type[Any] | None = None,
         run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[Any]:
         """Send a prompt to the agent and await its typed AgentReply."""
         return await self._run_turn(
@@ -142,6 +179,8 @@ class Agent:
             output_type=output_type,
             run_id=run_id,
             include_system=True,
+            tools=tools,
+            max_tool_rounds=max_tool_rounds,
         )
 
     async def _run_turn(
@@ -152,11 +191,20 @@ class Agent:
         output_type: type[Any] | None,
         run_id: str | None,
         include_system: bool,
-        tools: Sequence[ToolSpec] = (),
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
     ) -> AgentReply[Any]:
         effective_run_id = run_id or uuid4().hex
         target_type = output_type if output_type is not None else self.default_output_type
         response_format = ResponseFormat.from_type(target_type) if target_type is not None else None
+
+        active_tools = tuple(tools) if tools is not None else self.tools
+        tool_map = index_tools(active_tools)
+        tool_specs: tuple[ToolSpec, ...] = tuple(item.spec for item in active_tools)
+
+        round_limit = max_tool_rounds if max_tool_rounds is not None else self.max_tool_rounds
+        if round_limit < 1:
+            raise ValueError("max_tool_rounds must be >= 1")
 
         history: list[ChatMessage] = []
         if include_system and self.system_message is not None:
@@ -172,26 +220,53 @@ class Agent:
             MessageEvent(message=user_msg, source=self.name, run_id=effective_run_id)
         )
 
+        total_usage = Usage()
+        tool_rounds = 0
+
         with tracer.start_as_current_span(
             "ag2.agent.ask",
             attributes={"ag2.agent.name": self.name, "ag2.run_id": effective_run_id},
         ):
-            try:
-                model_response = await self._client.complete(
-                    history,
-                    tools=tools,
-                    response_format=response_format,
+            while True:
+                try:
+                    model_response = await self._client.complete(
+                        history,
+                        tools=tool_specs,
+                        response_format=response_format,
+                    )
+                except Exception as exc:
+                    await self._emit_error(exc, effective_run_id)
+                    raise
+
+                total_usage = _add_usage(total_usage, model_response.usage)
+                assistant_msg = model_response.message
+                history.append(assistant_msg)
+                await self.stream.emit(
+                    MessageEvent(message=assistant_msg, source=self.name, run_id=effective_run_id)
                 )
-            except Exception as exc:
-                await self._emit_error(exc, effective_run_id)
-                raise
 
-        assistant_msg = model_response.message
-        history.append(assistant_msg)
+                if not assistant_msg.tool_calls:
+                    break
 
-        await self.stream.emit(
-            MessageEvent(message=assistant_msg, source=self.name, run_id=effective_run_id)
-        )
+                tool_rounds += 1
+                if tool_rounds > round_limit:
+                    err = MaxToolRoundsError(
+                        f"Agent {self.name!r} exceeded max_tool_rounds={round_limit}"
+                    )
+                    await self._emit_error(err, effective_run_id)
+                    raise err
+
+                tool_messages = await self._execute_tool_calls(
+                    assistant_msg.tool_calls,
+                    tool_map=tool_map,
+                    run_id=effective_run_id,
+                )
+                for tool_msg in tool_messages:
+                    history.append(tool_msg)
+                    await self.stream.emit(
+                        MessageEvent(message=tool_msg, source=self.name, run_id=effective_run_id)
+                    )
+
         assistant_text = assistant_msg.content or ""
         if assistant_text:
             await self.stream.emit(
@@ -216,7 +291,8 @@ class Agent:
             agent=self.name,
             run_id=effective_run_id,
             model=model_response.model,
-            total_tokens=model_response.usage.total_tokens,
+            tool_rounds=tool_rounds,
+            total_tokens=total_usage.total_tokens,
         )
 
         return AgentReply(
@@ -225,11 +301,83 @@ class Agent:
             output=cast(Any, parsed_output),
             message=assistant_msg,
             history=tuple(history),
-            usage=model_response.usage,
+            usage=total_usage,
             run_id=effective_run_id,
             model=model_response.model,
             finish_reason=model_response.finish_reason,
         )
+
+    async def _execute_tool_calls(
+        self,
+        tool_calls: Sequence[ToolCall],
+        *,
+        tool_map: dict[str, Tool],
+        run_id: str,
+    ) -> list[ChatMessage]:
+        results: list[tuple[str, bool] | None] = [None] * len(tool_calls)
+
+        for tc in tool_calls:
+            await self.stream.emit(
+                ToolCallEvent(
+                    call_id=tc.id,
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                    source=self.name,
+                    run_id=run_id,
+                )
+            )
+
+        async def _run_one(index: int, tc: ToolCall) -> None:
+            tool_impl = tool_map.get(tc.name)
+            if tool_impl is None:
+                results[index] = (f"Error: unknown tool {tc.name!r}", True)
+                return
+
+            try:
+                raw_result = await tool_impl.invoke(tc.arguments)
+            except anyio.get_cancelled_exc_class():
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "ag2.tool.execution_failed",
+                    agent=self.name,
+                    tool=tc.name,
+                    call_id=tc.id,
+                    error=str(exc),
+                )
+                results[index] = (f"Error executing tool {tc.name!r}: {exc}", True)
+                return
+
+            results[index] = (serialize_tool_result(raw_result), False)
+
+        async with anyio.create_task_group() as tg:
+            for idx, tc in enumerate(tool_calls):
+                tg.start_soon(_run_one, idx, tc)
+
+        tool_messages: list[ChatMessage] = []
+        for idx, tc in enumerate(tool_calls):
+            pair = results[idx]
+            assert pair is not None
+            content, is_error = pair
+            await self.stream.emit(
+                ToolResultEvent(
+                    call_id=tc.id,
+                    tool_name=tc.name,
+                    content=content,
+                    is_error=is_error,
+                    source=self.name,
+                    run_id=run_id,
+                )
+            )
+            tool_messages.append(
+                ChatMessage(
+                    role="tool",
+                    tool_call_id=tc.id,
+                    name=tc.name,
+                    content=content,
+                )
+            )
+        return tool_messages
 
     async def _parse_structured_output(
         self,

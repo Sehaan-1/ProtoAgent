@@ -57,6 +57,14 @@ if TYPE_CHECKING:
         ToolSpec,
         create_model_client,
     )
+    from ag2.tools import (
+        MaxToolRoundsError,
+        Tool,
+        ToolError,
+        ToolExecutionError,
+        ToolValidationError,
+        tool,
+    )
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "Agent": ("ag2.agent", "Agent"),
@@ -103,6 +111,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "StructuredOutputError": ("ag2.providers", "StructuredOutputError"),
     "ToolSpec": ("ag2.providers", "ToolSpec"),
     "create_model_client": ("ag2.providers", "create_model_client"),
+    "MaxToolRoundsError": ("ag2.tools", "MaxToolRoundsError"),
+    "Tool": ("ag2.tools", "Tool"),
+    "ToolError": ("ag2.tools", "ToolError"),
+    "ToolExecutionError": ("ag2.tools", "ToolExecutionError"),
+    "ToolValidationError": ("ag2.tools", "ToolValidationError"),
+    "tool": ("ag2.tools", "tool"),
 }
 
 
@@ -141,6 +155,7 @@ __all__ = [
     "GeminiConfig",
     "HumanInputRequest",
     "HumanMessage",
+    "MaxToolRoundsError",
     "MemoryStream",
     "MessageEvent",
     "ModelClient",
@@ -154,12 +169,17 @@ __all__ = [
     "StreamClosedError",
     "StructuredOutputError",
     "TextEvent",
+    "Tool",
     "ToolCall",
     "ToolCallEvent",
+    "ToolError",
+    "ToolExecutionError",
     "ToolResultEvent",
     "ToolSpec",
+    "ToolValidationError",
     "Usage",
     "__version__",
     "create_model_client",
     "resolve_api_key",
+    "tool",
 ]
