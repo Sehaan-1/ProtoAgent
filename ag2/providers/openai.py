@@ -85,8 +85,8 @@ def _to_openai_tool(tool: ToolSpec) -> dict[str, Any]:
     }
 
 
-def _parse_tool_arguments(raw_args: str, tool_name: str) -> dict[str, Any]:
-    if not raw_args.strip():
+def _parse_tool_arguments(raw_args: str | None, tool_name: str) -> dict[str, Any]:
+    if raw_args is None or not raw_args.strip():
         return {}
     try:
         parsed = json.loads(raw_args)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 from collections.abc import Callable
@@ -14,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
 from ag2.hitl.context import Context
-from ag2.providers.base import ToolSpec
+from ag2.providers.base import ToolSpec, enforce_strict_json_schema
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer("ag2.tools")
@@ -45,19 +46,6 @@ def _is_context_annotation(annotation: Any) -> bool:
     return False
 
 
-def _enforce_strict_object_schema(node: Any) -> Any:
-    if isinstance(node, list):
-        return [_enforce_strict_object_schema(item) for item in node]
-    if not isinstance(node, dict):
-        return node
-    updated: dict[str, Any] = {
-        key: _enforce_strict_object_schema(value) for key, value in node.items()
-    }
-    if updated.get("type") == "object" and "additionalProperties" not in updated:
-        updated["additionalProperties"] = False
-    return updated
-
-
 def _build_params_model(
     fn: Callable[..., Any],
     tool_name: str,
@@ -76,7 +64,10 @@ def _build_params_model(
             raise ToolError(
                 f"Tool {tool_name!r} cannot use *args or **kwargs parameter {param_name!r}"
             )
-        annotation = hints.get(param_name, Any)
+        fallback_annotation = (
+            param.annotation if param.annotation is not inspect.Parameter.empty else Any
+        )
+        annotation = hints.get(param_name, fallback_annotation)
         if _is_context_annotation(annotation):
             if context_param is not None:
                 raise ToolError(f"Tool {tool_name!r} may declare at most one Context parameter")
@@ -137,7 +128,7 @@ class Tool:
         self._params_model, self._context_param = _build_params_model(fn, self.name)
         self._param_names = tuple(self._params_model.model_fields.keys())
         schema = self._params_model.model_json_schema()
-        self.parameters: dict[str, Any] = _enforce_strict_object_schema(schema)
+        self.parameters: dict[str, Any] = enforce_strict_json_schema(schema)
 
     @property
     def expects_context(self) -> bool:
@@ -178,7 +169,7 @@ class Tool:
         ):
             if self.is_async:
                 return await self._fn(**kwargs)
-            return await anyio.to_thread.run_sync(lambda: self._fn(**kwargs))
+            return await anyio.to_thread.run_sync(functools.partial(self._fn, **kwargs))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Allow direct invocation of the decorated function."""

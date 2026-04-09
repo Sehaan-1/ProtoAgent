@@ -216,6 +216,10 @@ class MemoryStream:
     ) -> None:
         if history_limit < 0:
             raise ValueError("history_limit must be >= 0")
+        if overflow_policy not in ("block", "drop_newest"):
+            raise ValueError(
+                f"overflow_policy must be 'block' or 'drop_newest', got {overflow_policy!r}"
+            )
         self._history_limit = history_limit
         self._overflow_policy: OverflowPolicy = overflow_policy
         self._history: deque[BaseEvent] = deque(maxlen=history_limit if history_limit > 0 else 0)

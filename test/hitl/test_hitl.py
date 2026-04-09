@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -136,16 +137,50 @@ async def test_context_input_timeout_default_error_and_choices() -> None:
 
 
 async def test_queue_hitl_hook_cancellation_cleans_up_pending() -> None:
-    hook = QueueHITLHook()
+    async with QueueHITLHook() as hook, MemoryStream() as stream:
+        ctx = Context.create(stream=stream, hitl_hook=hook)
+        with anyio.move_on_after(0.05) as scope:
+            await ctx.input("Waiting for human")
+        assert scope.cancelled_caught is True
+        assert hook.pending_count == 0
+
+
+async def test_cli_hitl_hook_timeout_abandons_blocked_input_thread() -> None:
+    release = threading.Event()
+
+    def blocking_input(_prompt_str: str) -> str:
+        release.wait(timeout=2.0)
+        return "late"
+
     try:
-        async with MemoryStream() as stream:
-            ctx = Context.create(stream=stream, hitl_hook=hook)
-            with anyio.move_on_after(0.05) as scope:
-                await ctx.input("Waiting for human")
-            assert scope.cancelled_caught is True
-            assert hook.pending_count == 0
+        async with MemoryStream(history_limit=10) as stream:
+            meta = {"env": "prod"}
+            ctx = Context(
+                stream=stream,
+                hitl_hook=CLIHITLHook(input_fn=blocking_input),
+                metadata=meta,
+            )
+            meta["env"] = "mutated"
+            assert ctx.metadata["env"] == "prod"
+
+            started = time.monotonic()
+            answer = await ctx.input("Proceed?", timeout=0.05, default="abort")
+            elapsed = time.monotonic() - started
+            assert answer == "abort"
+            assert elapsed < 0.5
     finally:
-        await hook.aclose()
+        release.set()
+
+
+async def test_async_callable_object_hitl_hook() -> None:
+    class _AsyncApprover:
+        async def __call__(self, req: HumanInputRequest) -> str:
+            await anyio.lowlevel.checkpoint()
+            return f"ok:{req.prompt}"
+
+    async with MemoryStream() as stream:
+        ctx = Context.create(stream=stream, hitl_hook=_AsyncApprover())
+        assert await ctx.input("Deploy?") == "ok:Deploy?"
 
 
 async def test_agent_raises_hitl_not_configured_when_hook_missing() -> None:

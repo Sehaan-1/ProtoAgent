@@ -205,6 +205,36 @@ async def test_openai_client_does_not_retry_bad_request() -> None:
     assert attempts == 1
 
 
+async def test_openai_client_handles_blank_and_null_tool_call_arguments() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_completion_payload(
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "call_blank",
+                        "type": "function",
+                        "function": {"name": "ping", "arguments": ""},
+                    },
+                    {
+                        "id": "call_null",
+                        "type": "function",
+                        "function": {"name": "status", "arguments": None},
+                    },
+                ],
+                finish_reason="tool_calls",
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        cfg = OpenAICompletionsConfig(model="gpt-4o-mini", api_key=SecretStr("sk-test"))
+        async with OpenAICompletionsClient(cfg, http_client=http_client) as client:
+            res = await client.complete([ChatMessage(role="user", content="hi")])
+
+    assert [tc.arguments for tc in res.message.tool_calls] == [{}, {}]
+
+
 async def test_openai_client_rejects_invalid_tool_call_json() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

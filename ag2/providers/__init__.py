@@ -8,6 +8,7 @@ from ag2.providers.base import (
     RetryableProviderError,
     StructuredOutputError,
     ToolSpec,
+    enforce_strict_json_schema,
 )
 from ag2.providers.factory import create_model_client
 from ag2.providers.openai import OpenAICompletionsClient
@@ -22,4 +23,5 @@ __all__ = [
     "StructuredOutputError",
     "ToolSpec",
     "create_model_client",
+    "enforce_strict_json_schema",
 ]

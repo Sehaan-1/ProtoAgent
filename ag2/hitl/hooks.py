@@ -6,7 +6,7 @@ import builtins
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, Self, runtime_checkable
 
 import anyio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -33,7 +33,11 @@ class CallbackHITLHook:
         if not callable(callback):
             raise TypeError("HITL callback must be callable")
         self._callback = callback
-        self._is_async = inspect.iscoroutinefunction(callback)
+        is_async_fn = inspect.iscoroutinefunction(callback)
+        is_async_obj = not inspect.isfunction(callback) and inspect.iscoroutinefunction(
+            type(callback).__call__
+        )
+        self._is_async = is_async_fn or is_async_obj
 
     async def request_input(self, request: HumanInputRequest) -> str | HumanMessage:
         if self._is_async:
@@ -110,6 +114,12 @@ class QueueHITLHook:
             await self._send_stream.aclose()
             await self._receive_stream.aclose()
 
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
 
 class CLIHITLHook:
     """Interactive terminal prompt HITLHook offloaded to an anyio worker thread."""
@@ -131,7 +141,11 @@ class CLIHITLHook:
             prompt_parts.append(f"default={request.default!r}")
         rendered = " ".join(prompt_parts) + ": "
 
-        raw = await anyio.to_thread.run_sync(self._input_fn, rendered)
+        raw = await anyio.to_thread.run_sync(
+            self._input_fn,
+            rendered,
+            abandon_on_cancel=True,
+        )
         content = raw if raw or request.default is None else request.default
         return HumanMessage(
             request_id=request.request_id,

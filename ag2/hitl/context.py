@@ -42,6 +42,9 @@ class Context:
     call_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
     @classmethod
     def create(
         cls,
@@ -135,8 +138,9 @@ class Context:
                         tool=self.tool_name,
                     )
                     return default
+                timeout_detail = f" after {timeout}s" if timeout is not None else ""
                 raise HITLTimeoutError(
-                    f"Human input request {request.request_id!r} timed out after {timeout}s"
+                    f"Human input request {request.request_id!r} timed out{timeout_detail}"
                 ) from exc
 
         if isinstance(raw_response, HumanMessage):

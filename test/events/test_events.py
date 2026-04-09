@@ -207,6 +207,14 @@ def test_events_validation_errors_on_invalid_filter() -> None:
     stream = MemoryStream()
     with pytest.raises(TypeError):
         stream.where(123)  # type: ignore[call-overload]
+    with pytest.raises(TypeError, match="BaseEvent subclass"):
+        stream.where(int)  # type: ignore[type-var]
+    with pytest.raises(ValueError, match="overflow_policy"):
+        MemoryStream(overflow_policy="invalid")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="BaseEvent subclass"):
+        stream.where(int)  # type: ignore[type-var]
+    with pytest.raises(ValueError, match="overflow_policy"):
+        MemoryStream(overflow_policy="invalid")  # type: ignore[arg-type]
 
 
 def test_events_does_not_import_downstream_layers() -> None:

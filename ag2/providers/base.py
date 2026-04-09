@@ -32,15 +32,15 @@ class ToolSpec(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
-def _enforce_strict_json_schema(node: Any) -> Any:
+def enforce_strict_json_schema(node: Any) -> Any:
     """Recursively set additionalProperties=False on JSON Schema object nodes."""
     if isinstance(node, list):
-        return [_enforce_strict_json_schema(item) for item in node]
+        return [enforce_strict_json_schema(item) for item in node]
     if not isinstance(node, dict):
         return node
 
     updated: dict[str, Any] = {
-        key: _enforce_strict_json_schema(value) for key, value in node.items()
+        key: enforce_strict_json_schema(value) for key, value in node.items()
     }
     if updated.get("type") == "object" and "additionalProperties" not in updated:
         updated["additionalProperties"] = False
@@ -61,7 +61,7 @@ class ResponseFormat(BaseModel):
         """Build a ResponseFormat from any Pydantic-compatible Python type."""
         schema = TypeAdapter(output_type).json_schema()
         if strict:
-            schema = _enforce_strict_json_schema(schema)
+            schema = enforce_strict_json_schema(schema)
         name = getattr(output_type, "__name__", "StructuredOutput")
         return cls(name=name, json_schema=schema, strict=strict)
 

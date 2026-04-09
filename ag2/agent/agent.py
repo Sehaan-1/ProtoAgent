@@ -24,7 +24,13 @@ from ag2.events.models import (
 from ag2.events.stream import MemoryStream
 from ag2.hitl.context import Context, HITLNotConfiguredError
 from ag2.hitl.hooks import HITLCallable, HITLHook, coerce_hitl_hook
-from ag2.providers.base import ModelClient, ResponseFormat, StructuredOutputError, ToolSpec
+from ag2.providers.base import (
+    ModelClient,
+    ModelResponse,
+    ResponseFormat,
+    StructuredOutputError,
+    ToolSpec,
+)
 from ag2.providers.factory import create_model_client
 from ag2.tools.tool import MaxToolRoundsError, Tool, index_tools, serialize_tool_result
 
@@ -243,6 +249,8 @@ class Agent:
 
         total_usage = Usage()
         tool_rounds = 0
+        model_response: ModelResponse | None = None
+        assistant_msg: ChatMessage | None = None
 
         with tracer.start_as_current_span(
             "ag2.agent.ask",
@@ -294,6 +302,7 @@ class Agent:
                         MessageEvent(message=tool_msg, source=self.name, run_id=effective_run_id)
                     )
 
+        assert model_response is not None and assistant_msg is not None
         assistant_text = assistant_msg.content or ""
         if assistant_text:
             await self.stream.emit(
