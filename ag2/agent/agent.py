@@ -22,6 +22,8 @@ from ag2.events.models import (
     ToolResultEvent,
 )
 from ag2.events.stream import MemoryStream
+from ag2.hitl.context import Context, HITLNotConfiguredError
+from ag2.hitl.hooks import HITLCallable, HITLHook, coerce_hitl_hook
 from ag2.providers.base import ModelClient, ResponseFormat, StructuredOutputError, ToolSpec
 from ag2.providers.factory import create_model_client
 from ag2.tools.tool import MaxToolRoundsError, Tool, index_tools, serialize_tool_result
@@ -68,6 +70,7 @@ class AgentReply(Generic[T]):
         output_type: type[T],
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[T]: ...
 
     @overload
@@ -78,6 +81,7 @@ class AgentReply(Generic[T]):
         output_type: None = None,
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[Any]: ...
 
     async def ask(
@@ -87,6 +91,7 @@ class AgentReply(Generic[T]):
         output_type: type[Any] | None = None,
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[Any]:
         """Continue this exact conversation thread with a follow-up prompt."""
         return await self.agent._run_turn(
@@ -97,11 +102,12 @@ class AgentReply(Generic[T]):
             include_system=False,
             tools=tools,
             max_tool_rounds=max_tool_rounds,
+            hitl_hook=hitl_hook,
         )
 
 
 class Agent:
-    """Async protocol-driven conversational agent with tool-calling support."""
+    """Async protocol-driven conversational agent with tool-calling and HITL support."""
 
     def __init__(
         self,
@@ -113,6 +119,7 @@ class Agent:
         output_type: type[Any] | None = None,
         tools: Sequence[Tool] = (),
         max_tool_rounds: int = 10,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> None:
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be >= 1")
@@ -123,6 +130,7 @@ class Agent:
         self.tools = tuple(tools)
         index_tools(self.tools)
         self.max_tool_rounds = max_tool_rounds
+        self.hitl_hook: HITLHook | None = coerce_hitl_hook(hitl_hook)
 
         if isinstance(model, ModelConfig):
             self._client: ModelClient = create_model_client(model)
@@ -148,6 +156,7 @@ class Agent:
         run_id: str | None = None,
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[T]: ...
 
     @overload
@@ -160,6 +169,7 @@ class Agent:
         run_id: str | None = None,
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[Any]: ...
 
     async def ask(
@@ -171,6 +181,7 @@ class Agent:
         run_id: str | None = None,
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[Any]:
         """Send a prompt to the agent and await its typed AgentReply."""
         return await self._run_turn(
@@ -181,6 +192,7 @@ class Agent:
             include_system=True,
             tools=tools,
             max_tool_rounds=max_tool_rounds,
+            hitl_hook=hitl_hook,
         )
 
     async def _run_turn(
@@ -193,6 +205,7 @@ class Agent:
         include_system: bool,
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
     ) -> AgentReply[Any]:
         effective_run_id = run_id or uuid4().hex
         target_type = output_type if output_type is not None else self.default_output_type
@@ -205,6 +218,14 @@ class Agent:
         round_limit = max_tool_rounds if max_tool_rounds is not None else self.max_tool_rounds
         if round_limit < 1:
             raise ValueError("max_tool_rounds must be >= 1")
+
+        active_hook = coerce_hitl_hook(hitl_hook) if hitl_hook is not None else self.hitl_hook
+        base_context = Context(
+            stream=self.stream,
+            hitl_hook=active_hook,
+            source=self.name,
+            run_id=effective_run_id,
+        )
 
         history: list[ChatMessage] = []
         if include_system and self.system_message is not None:
@@ -256,11 +277,17 @@ class Agent:
                     await self._emit_error(err, effective_run_id)
                     raise err
 
-                tool_messages = await self._execute_tool_calls(
-                    assistant_msg.tool_calls,
-                    tool_map=tool_map,
-                    run_id=effective_run_id,
-                )
+                try:
+                    tool_messages = await self._execute_tool_calls(
+                        assistant_msg.tool_calls,
+                        tool_map=tool_map,
+                        context=base_context,
+                        run_id=effective_run_id,
+                    )
+                except Exception as exc:
+                    await self._emit_error(exc, effective_run_id)
+                    raise
+
                 for tool_msg in tool_messages:
                     history.append(tool_msg)
                     await self.stream.emit(
@@ -312,6 +339,7 @@ class Agent:
         tool_calls: Sequence[ToolCall],
         *,
         tool_map: dict[str, Tool],
+        context: Context,
         run_id: str,
     ) -> list[ChatMessage]:
         results: list[tuple[str, bool] | None] = [None] * len(tool_calls)
@@ -333,9 +361,12 @@ class Agent:
                 results[index] = (f"Error: unknown tool {tc.name!r}", True)
                 return
 
+            tool_context = context.with_tool(tool_name=tc.name, call_id=tc.id)
             try:
-                raw_result = await tool_impl.invoke(tc.arguments)
+                raw_result = await tool_impl.invoke(tc.arguments, context=tool_context)
             except anyio.get_cancelled_exc_class():
+                raise
+            except HITLNotConfiguredError:
                 raise
             except Exception as exc:
                 logger.warning(
@@ -350,9 +381,12 @@ class Agent:
 
             results[index] = (serialize_tool_result(raw_result), False)
 
-        async with anyio.create_task_group() as tg:
-            for idx, tc in enumerate(tool_calls):
-                tg.start_soon(_run_one, idx, tc)
+        try:
+            async with anyio.create_task_group() as tg:
+                for idx, tc in enumerate(tool_calls):
+                    tg.start_soon(_run_one, idx, tc)
+        except* HITLNotConfiguredError as eg:
+            raise eg.exceptions[0] from eg
 
         tool_messages: list[ChatMessage] = []
         for idx, tc in enumerate(tool_calls):

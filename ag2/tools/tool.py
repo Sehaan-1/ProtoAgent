@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
-from typing import Any, get_type_hints, overload
+from typing import Annotated, Any, get_args, get_origin, get_type_hints, overload
 
 import anyio
 import structlog
@@ -13,6 +13,7 @@ from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
+from ag2.hitl.context import Context
 from ag2.providers.base import ToolSpec
 
 logger = structlog.get_logger(__name__)
@@ -35,6 +36,15 @@ class MaxToolRoundsError(ToolError):
     """Raised when an agent exceeds its configured max_tool_rounds budget."""
 
 
+def _is_context_annotation(annotation: Any) -> bool:
+    if annotation is Context:
+        return True
+    if get_origin(annotation) is Annotated:
+        args = get_args(annotation)
+        return bool(args and args[0] is Context)
+    return False
+
+
 def _enforce_strict_object_schema(node: Any) -> Any:
     if isinstance(node, list):
         return [_enforce_strict_object_schema(item) for item in node]
@@ -48,7 +58,10 @@ def _enforce_strict_object_schema(node: Any) -> Any:
     return updated
 
 
-def _build_params_model(fn: Callable[..., Any], tool_name: str) -> type[BaseModel]:
+def _build_params_model(
+    fn: Callable[..., Any],
+    tool_name: str,
+) -> tuple[type[BaseModel], str | None]:
     sig = inspect.signature(fn)
     try:
         hints = get_type_hints(fn, include_extras=True)
@@ -56,12 +69,20 @@ def _build_params_model(fn: Callable[..., Any], tool_name: str) -> type[BaseMode
         hints = {}
 
     field_definitions: dict[str, Any] = {}
+    context_param: str | None = None
+
     for param_name, param in sig.parameters.items():
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             raise ToolError(
                 f"Tool {tool_name!r} cannot use *args or **kwargs parameter {param_name!r}"
             )
         annotation = hints.get(param_name, Any)
+        if _is_context_annotation(annotation):
+            if context_param is not None:
+                raise ToolError(f"Tool {tool_name!r} may declare at most one Context parameter")
+            context_param = param_name
+            continue
+
         if param.default is inspect.Parameter.empty:
             field_definitions[param_name] = (annotation, ...)
         elif isinstance(param.default, FieldInfo):
@@ -74,7 +95,7 @@ def _build_params_model(fn: Callable[..., Any], tool_name: str) -> type[BaseMode
         __config__=ConfigDict(extra="forbid", arbitrary_types_allowed=True),
         **field_definitions,
     )
-    return model_cls
+    return model_cls, context_param
 
 
 def serialize_tool_result(result: Any) -> str:
@@ -113,10 +134,15 @@ class Tool:
         self.description = description if description is not None else raw_doc
         self.is_async = inspect.iscoroutinefunction(fn)
 
-        self._params_model = _build_params_model(fn, self.name)
+        self._params_model, self._context_param = _build_params_model(fn, self.name)
         self._param_names = tuple(self._params_model.model_fields.keys())
         schema = self._params_model.model_json_schema()
         self.parameters: dict[str, Any] = _enforce_strict_object_schema(schema)
+
+    @property
+    def expects_context(self) -> bool:
+        """Whether the wrapped tool declares an injected HITL Context parameter."""
+        return self._context_param is not None
 
     @property
     def spec(self) -> ToolSpec:
@@ -135,9 +161,17 @@ class Tool:
             raise ToolValidationError(f"Invalid arguments for tool {self.name!r}: {exc}") from exc
         return {field: getattr(validated, field) for field in self._param_names}
 
-    async def invoke(self, arguments: dict[str, Any] | None = None) -> Any:
+    async def invoke(
+        self,
+        arguments: dict[str, Any] | None = None,
+        *,
+        context: Context | None = None,
+    ) -> Any:
         """Validate arguments and asynchronously invoke the wrapped function."""
         kwargs = self.validate_arguments(arguments if arguments is not None else {})
+        if self._context_param is not None:
+            kwargs[self._context_param] = context if context is not None else Context()
+
         with tracer.start_as_current_span(
             "ag2.tool.invoke",
             attributes={"ag2.tool.name": self.name, "ag2.tool.is_async": self.is_async},
