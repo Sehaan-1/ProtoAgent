@@ -111,6 +111,7 @@ class Tool:
         *,
         name: str | None = None,
         description: str | None = None,
+        parameters: dict[str, Any] | None = None,
     ) -> None:
         if not callable(fn):
             raise TypeError("tool target must be callable")
@@ -123,12 +124,46 @@ class Tool:
 
         raw_doc = inspect.getdoc(fn) or ""
         self.description = description if description is not None else raw_doc
-        self.is_async = inspect.iscoroutinefunction(fn)
+        is_async_fn = inspect.iscoroutinefunction(fn)
+        is_async_obj = not inspect.isfunction(fn) and inspect.iscoroutinefunction(type(fn).__call__)
+        self.is_async = is_async_fn or is_async_obj
 
-        self._params_model, self._context_param = _build_params_model(fn, self.name)
-        self._param_names = tuple(self._params_model.model_fields.keys())
-        schema = self._params_model.model_json_schema()
+        if parameters is None:
+            params_model, context_param = _build_params_model(fn, self.name)
+            self._params_model: type[BaseModel] | None = params_model
+            self._context_param: str | None = context_param
+            self._param_names: tuple[str, ...] = tuple(params_model.model_fields.keys())
+            self._required_keys: tuple[str, ...] = ()
+            schema = params_model.model_json_schema()
+        else:
+            self._params_model = None
+            self._context_param = None
+            self._param_names = ()
+            raw_required = parameters.get("required", ())
+            self._required_keys = (
+                tuple(str(k) for k in raw_required) if isinstance(raw_required, list) else ()
+            )
+            schema = dict(parameters) if parameters else {"type": "object", "properties": {}}
         self.parameters: dict[str, Any] = enforce_strict_json_schema(schema)
+
+    @classmethod
+    def from_schema(
+        cls,
+        fn: Callable[..., Any],
+        *,
+        name: str,
+        description: str = "",
+        parameters: dict[str, Any] | None = None,
+    ) -> Tool:
+        """Construct a Tool from an explicit JSON Schema (e.g. remote MCP tools)."""
+        return cls(
+            fn,
+            name=name,
+            description=description,
+            parameters=parameters
+            if parameters is not None
+            else {"type": "object", "properties": {}},
+        )
 
     @property
     def expects_context(self) -> bool:
@@ -146,6 +181,17 @@ class Tool:
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Validate raw tool arguments and return typed keyword arguments."""
+        if self._params_model is None:
+            if not isinstance(arguments, dict):
+                raise ToolValidationError(
+                    f"Invalid arguments for tool {self.name!r}: expected JSON object"
+                )
+            missing = [key for key in self._required_keys if key not in arguments]
+            if missing:
+                raise ToolValidationError(
+                    f"Invalid arguments for tool {self.name!r}: missing required keys {missing}"
+                )
+            return dict(arguments)
         try:
             validated = self._params_model.model_validate(arguments)
         except ValidationError as exc:
