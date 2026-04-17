@@ -19,7 +19,7 @@ from ag2.network.hub import Hub
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer("ag2.network.channels")
 
-ChannelKind = Literal["conversation", "consulting", "discussion"]
+ChannelKind = Literal["conversation", "consulting", "discussion", "workflow"]
 StopPredicate = Callable[["ChannelTurn", tuple["ChannelTurn", ...]], bool]
 SpeakerSelector = Callable[
     [tuple["ChannelTurn", ...], tuple[Agent, ...]],
