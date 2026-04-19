@@ -24,6 +24,7 @@ from ag2.events.models import (
 from ag2.events.stream import MemoryStream
 from ag2.hitl.context import Context, HITLNotConfiguredError
 from ag2.hitl.hooks import HITLCallable, HITLHook, coerce_hitl_hook
+from ag2.middleware.pipeline import MessageMiddleware, TurnContext
 from ag2.providers.base import (
     ModelClient,
     ModelResponse,
@@ -126,6 +127,7 @@ class Agent:
         tools: Sequence[Tool] = (),
         max_tool_rounds: int = 10,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        middleware: Sequence[MessageMiddleware] = (),
     ) -> None:
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be >= 1")
@@ -137,6 +139,7 @@ class Agent:
         index_tools(self.tools)
         self.max_tool_rounds = max_tool_rounds
         self.hitl_hook: HITLHook | None = coerce_hitl_hook(hitl_hook)
+        self.middleware: tuple[MessageMiddleware, ...] = tuple(middleware)
 
         if isinstance(model, ModelConfig):
             self._client: ModelClient = create_model_client(model)
@@ -251,15 +254,24 @@ class Agent:
         tool_rounds = 0
         model_response: ModelResponse | None = None
         assistant_msg: ChatMessage | None = None
+        turn_context = TurnContext(
+            prompt=user_msg,
+            source=self.name,
+            run_id=effective_run_id,
+            stream=self.stream,
+        )
 
         with tracer.start_as_current_span(
             "ag2.agent.ask",
             attributes={"ag2.agent.name": self.name, "ag2.run_id": effective_run_id},
         ):
             while True:
+                request_messages = list(history)
+                for mw in self.middleware:
+                    request_messages = await mw.transform(request_messages, turn_context)
                 try:
                     model_response = await self._client.complete(
-                        history,
+                        request_messages,
                         tools=tool_specs,
                         response_format=response_format,
                     )

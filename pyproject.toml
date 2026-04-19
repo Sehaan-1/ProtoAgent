@@ -63,6 +63,7 @@ all = [
 
 [dependency-groups]
 dev = [
+    "aiofiles>=24.1.0",
     "aiosqlite>=0.20.0",
     "mcp>=2.0.0",
     "mypy>=1.13.0",
@@ -71,6 +72,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
+    "types-aiofiles>=24.1.0",
 ]
 
 [tool.hatch.version]
