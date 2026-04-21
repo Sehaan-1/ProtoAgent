@@ -54,6 +54,8 @@ telemetry = [
 dev = [
     { name = "aiofiles" },
     { name = "aiosqlite" },
+    { name = "anthropic" },
+    { name = "google-genai" },
     { name = "mcp" },
     { name = "mypy" },
     { name = "openai" },
@@ -93,6 +95,8 @@ provides-extras = ["all", "anthropic", "gemini", "mcp", "openai", "storage", "te
 dev = [
     { name = "aiofiles", specifier = ">=24.1.0" },
     { name = "aiosqlite", specifier = ">=0.20.0" },
+    { name = "anthropic", specifier = ">=0.40.0" },
+    { name = "google-genai", specifier = ">=1.0.0" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "openai", specifier = ">=1.55.0" },

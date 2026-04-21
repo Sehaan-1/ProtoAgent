@@ -114,6 +114,8 @@ if TYPE_CHECKING:
         workflow,
     )
     from ag2.providers import (
+        AnthropicClient,
+        GeminiClient,
         ModelClient,
         ModelResponse,
         OpenAICompletionsClient,
@@ -224,6 +226,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "conversation": ("ag2.network", "conversation"),
     "discussion": ("ag2.network", "discussion"),
     "workflow": ("ag2.network", "workflow"),
+    "AnthropicClient": ("ag2.providers", "AnthropicClient"),
+    "GeminiClient": ("ag2.providers", "GeminiClient"),
     "ModelClient": ("ag2.providers", "ModelClient"),
     "ModelResponse": ("ag2.providers", "ModelResponse"),
     "OpenAICompletionsClient": ("ag2.providers", "OpenAICompletionsClient"),
@@ -267,6 +271,7 @@ __all__ = [
     "Agent",
     "AgentNotFoundError",
     "AgentReply",
+    "AnthropicClient",
     "AnthropicConfig",
     "AnyEvent",
     "AnyMCPConfig",
@@ -292,6 +297,7 @@ __all__ = [
     "DiskKnowledgeStore",
     "DuplicateAgentError",
     "ErrorEvent",
+    "GeminiClient",
     "GeminiConfig",
     "HITLCallable",
     "HITLError",

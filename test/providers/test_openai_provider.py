@@ -10,9 +10,11 @@ import httpx
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from ag2.config import AnthropicConfig, OpenAICompletionsConfig
+from ag2.config import AnthropicConfig, GeminiConfig, ModelConfig, OpenAICompletionsConfig
 from ag2.events import ChatMessage
 from ag2.providers import (
+    AnthropicClient,
+    GeminiClient,
     OpenAICompletionsClient,
     ProviderError,
     ResponseFormat,
@@ -265,8 +267,14 @@ def test_factory_and_missing_openai_extra_error(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(client, OpenAICompletionsClient)
 
     anthropic_cfg = AnthropicConfig(model="claude-3-7-sonnet-latest", api_key=SecretStr("sk-ant"))
+    assert isinstance(create_model_client(anthropic_cfg), AnthropicClient)
+
+    gemini_cfg = GeminiConfig(model="gemini-2.5-flash", api_key=SecretStr("gm-test"))
+    assert isinstance(create_model_client(gemini_cfg), GeminiClient)
+
+    custom_cfg = ModelConfig(provider="custom-unimplemented", model="m1")
     with pytest.raises(NotImplementedError):
-        create_model_client(anthropic_cfg)
+        create_model_client(custom_cfg)
 
     real_import = builtins.__import__
 
