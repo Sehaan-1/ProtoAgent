@@ -7,9 +7,12 @@ from ag2.providers.base import (
     ProviderError,
     ResponseFormat,
     RetryableProviderError,
+    StreamChunk,
+    StreamingModelClient,
     StructuredOutputError,
     ToolSpec,
     enforce_strict_json_schema,
+    stream_model_response,
 )
 from ag2.providers.factory import create_model_client
 from ag2.providers.gemini import GeminiClient
@@ -24,8 +27,11 @@ __all__ = [
     "ProviderError",
     "ResponseFormat",
     "RetryableProviderError",
+    "StreamChunk",
+    "StreamingModelClient",
     "StructuredOutputError",
     "ToolSpec",
     "create_model_client",
     "enforce_strict_json_schema",
+    "stream_model_response",
 ]

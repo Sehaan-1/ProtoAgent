@@ -1,8 +1,8 @@
-"""Core provider protocols, response models, and structured output helpers."""
+"""Core provider protocols, response models, streaming contracts, and structured output helpers."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -78,6 +78,15 @@ class ModelResponse(BaseModel):
     raw: Any = Field(default=None, exclude=True)
 
 
+class StreamChunk(BaseModel):
+    """Single incremental token delta or terminal response emitted during streaming."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text_delta: str | None = None
+    response: ModelResponse | None = None
+
+
 @runtime_checkable
 class ModelClient(Protocol):
     """Async protocol implemented by all model provider adapters."""
@@ -95,3 +104,45 @@ class ModelClient(Protocol):
     async def aclose(self) -> None:
         """Release underlying HTTP/SDK resources."""
         ...
+
+
+@runtime_checkable
+class StreamingModelClient(ModelClient, Protocol):
+    """Optional extension protocol for ModelClients supporting token streaming."""
+
+    def stream_complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        response_format: ResponseFormat | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Yield incremental StreamChunk deltas ending with a final ModelResponse chunk."""
+        ...
+
+
+async def stream_model_response(
+    client: ModelClient,
+    messages: Sequence[ChatMessage],
+    *,
+    tools: Sequence[ToolSpec] = (),
+    response_format: ResponseFormat | None = None,
+) -> AsyncIterator[StreamChunk]:
+    """Stream chunks from ``client``, falling back gracefully to ``complete()``."""
+    if isinstance(client, StreamingModelClient):
+        async for chunk in client.stream_complete(
+            messages,
+            tools=tools,
+            response_format=response_format,
+        ):
+            yield chunk
+        return
+
+    response = await client.complete(
+        messages,
+        tools=tools,
+        response_format=response_format,
+    )
+    if response.message.content:
+        yield StreamChunk(text_delta=response.message.content)
+    yield StreamChunk(response=response)

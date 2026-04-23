@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Self, cast
 
@@ -25,6 +25,7 @@ from ag2.providers.base import (
     ProviderError,
     ResponseFormat,
     RetryableProviderError,
+    StreamChunk,
     ToolSpec,
 )
 
@@ -307,6 +308,105 @@ class GeminiClient:
             model=cast(str, getattr(response, "model_version", None) or self.config.model),
             finish_reason=finish_reason,
             raw=response,
+        )
+
+    async def stream_complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        response_format: ResponseFormat | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream Gemini text deltas and yield the final assembled ModelResponse."""
+        types_mod = self._types
+        api_error_cls = self._errors.APIError
+        system_instruction, contents = _to_gemini_contents(messages, types_mod)
+        cfg_kwargs: dict[str, Any] = {}
+        if system_instruction is not None:
+            cfg_kwargs["system_instruction"] = system_instruction
+        if self.config.temperature is not None:
+            cfg_kwargs["temperature"] = self.config.temperature
+        if self.config.max_tokens is not None:
+            cfg_kwargs["max_output_tokens"] = self.config.max_tokens
+        if self.config.top_k is not None:
+            cfg_kwargs["top_k"] = self.config.top_k
+        if tools:
+            declarations = [
+                types_mod.FunctionDeclaration(
+                    name=t.name,
+                    description=t.description,
+                    parameters_json_schema=t.parameters or {"type": "object", "properties": {}},
+                )
+                for t in tools
+            ]
+            cfg_kwargs["tools"] = [types_mod.Tool(function_declarations=declarations)]
+        if response_format is not None:
+            cfg_kwargs["response_mime_type"] = "application/json"
+            cfg_kwargs["response_json_schema"] = response_format.json_schema
+        gen_config = types_mod.GenerateContentConfig(**cfg_kwargs) if cfg_kwargs else None
+
+        with tracer.start_as_current_span(
+            "ag2.provider.gemini.stream_complete",
+            attributes={"gen_ai.request.model": self.config.model},
+        ):
+            text_parts: list[str] = []
+            tool_calls: list[ToolCall] = []
+            usage = Usage()
+            model_version = self.config.model
+            finish_reason: str | None = None
+            try:
+                stream = await self._client.aio.models.generate_content_stream(
+                    model=self.config.model,
+                    contents=contents,
+                    config=gen_config,
+                )
+                async for chunk in stream:
+                    if getattr(chunk, "model_version", None):
+                        model_version = str(chunk.model_version)
+                    usage_meta = getattr(chunk, "usage_metadata", None)
+                    if usage_meta is not None:
+                        pt = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
+                        ct = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
+                        tt = int(getattr(usage_meta, "total_token_count", 0) or (pt + ct))
+                        usage = Usage(prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+                    candidates = getattr(chunk, "candidates", None) or []
+                    if not candidates:
+                        continue
+                    candidate = candidates[0]
+                    fr = getattr(candidate, "finish_reason", None)
+                    if fr is not None:
+                        finish_reason = str(getattr(fr, "value", fr))
+                    parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+                    for part in parts:
+                        text = getattr(part, "text", None)
+                        if isinstance(text, str) and text:
+                            text_parts.append(text)
+                            yield StreamChunk(text_delta=text)
+                        fc = getattr(part, "function_call", None)
+                        if fc is not None:
+                            fc_id = getattr(fc, "id", None) or f"gemini_call_{len(tool_calls)}"
+                            raw_args = getattr(fc, "args", None)
+                            tool_calls.append(
+                                ToolCall(
+                                    id=str(fc_id),
+                                    name=str(getattr(fc, "name", "")),
+                                    arguments=dict(raw_args) if isinstance(raw_args, dict) else {},
+                                )
+                            )
+            except (api_error_cls, httpx.HTTPError) as exc:
+                raise ProviderError(f"Gemini stream request failed: {exc}") from exc
+
+        yield StreamChunk(
+            response=ModelResponse(
+                message=ChatMessage(
+                    role="assistant",
+                    content="".join(text_parts) if text_parts else None,
+                    tool_calls=tool_calls,
+                ),
+                usage=usage,
+                model=model_version,
+                finish_reason=finish_reason,
+            )
         )
 
     async def aclose(self) -> None:

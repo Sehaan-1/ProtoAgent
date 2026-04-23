@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ag2._version import __version__
 
 if TYPE_CHECKING:
-    from ag2.agent import Agent, AgentReply
+    from ag2.agent import Agent, AgentReply, AgentStream
     from ag2.compact import (
         CompactionStrategy,
         CompactTrigger,
@@ -122,9 +122,12 @@ if TYPE_CHECKING:
         ProviderError,
         ResponseFormat,
         RetryableProviderError,
+        StreamChunk,
+        StreamingModelClient,
         StructuredOutputError,
         ToolSpec,
         create_model_client,
+        stream_model_response,
     )
     from ag2.tools import (
         MaxToolRoundsError,
@@ -138,6 +141,7 @@ if TYPE_CHECKING:
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "Agent": ("ag2.agent", "Agent"),
     "AgentReply": ("ag2.agent", "AgentReply"),
+    "AgentStream": ("ag2.agent", "AgentStream"),
     "CompactionStrategy": ("ag2.compact", "CompactionStrategy"),
     "CompactTrigger": ("ag2.compact", "CompactTrigger"),
     "SummarizeCompact": ("ag2.compact", "SummarizeCompact"),
@@ -234,9 +238,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ProviderError": ("ag2.providers", "ProviderError"),
     "ResponseFormat": ("ag2.providers", "ResponseFormat"),
     "RetryableProviderError": ("ag2.providers", "RetryableProviderError"),
+    "StreamChunk": ("ag2.providers", "StreamChunk"),
+    "StreamingModelClient": ("ag2.providers", "StreamingModelClient"),
     "StructuredOutputError": ("ag2.providers", "StructuredOutputError"),
     "ToolSpec": ("ag2.providers", "ToolSpec"),
     "create_model_client": ("ag2.providers", "create_model_client"),
+    "stream_model_response": ("ag2.providers", "stream_model_response"),
     "MaxToolRoundsError": ("ag2.tools", "MaxToolRoundsError"),
     "Tool": ("ag2.tools", "Tool"),
     "ToolError": ("ag2.tools", "ToolError"),
@@ -271,6 +278,7 @@ __all__ = [
     "Agent",
     "AgentNotFoundError",
     "AgentReply",
+    "AgentStream",
     "AnthropicClient",
     "AnthropicConfig",
     "AnyEvent",
@@ -333,7 +341,9 @@ __all__ = [
     "QueueHITLHook",
     "ResponseFormat",
     "RetryableProviderError",
+    "StreamChunk",
     "StreamClosedError",
+    "StreamingModelClient",
     "StructuredOutputError",
     "SummarizeCompact",
     "TailWindowCompact",
@@ -363,6 +373,7 @@ __all__ = [
     "estimate_tokens",
     "load_mcp_tools",
     "resolve_api_key",
+    "stream_model_response",
     "tool",
     "workflow",
 ]

@@ -28,9 +28,11 @@ from ag2.middleware.pipeline import MessageMiddleware, TurnContext
 from ag2.providers.base import (
     ModelClient,
     ModelResponse,
+    ProviderError,
     ResponseFormat,
     StructuredOutputError,
     ToolSpec,
+    stream_model_response,
 )
 from ag2.providers.factory import create_model_client
 from ag2.tools.tool import MaxToolRoundsError, Tool, index_tools, serialize_tool_result
@@ -78,6 +80,7 @@ class AgentReply(Generic[T]):
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
     ) -> AgentReply[T]: ...
 
     @overload
@@ -89,6 +92,7 @@ class AgentReply(Generic[T]):
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
     ) -> AgentReply[Any]: ...
 
     async def ask(
@@ -99,6 +103,7 @@ class AgentReply(Generic[T]):
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
     ) -> AgentReply[Any]:
         """Continue this exact conversation thread with a follow-up prompt."""
         return await self.agent._run_turn(
@@ -110,7 +115,98 @@ class AgentReply(Generic[T]):
             tools=tools,
             max_tool_rounds=max_tool_rounds,
             hitl_hook=hitl_hook,
+            stream=stream,
         )
+
+
+class AgentStream(Generic[T]):
+    """Async context manager yielding live TextEvent deltas and exposing the final reply."""
+
+    def __init__(
+        self,
+        agent: Agent,
+        prompt: str | ChatMessage,
+        *,
+        messages: Sequence[ChatMessage] | None = None,
+        output_type: type[T] | None = None,
+        run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
+    ) -> None:
+        self._agent = agent
+        self._prompt = prompt
+        self._messages = messages
+        self._output_type = output_type
+        self._run_id = run_id or uuid4().hex
+        self._tools = tools
+        self._max_tool_rounds = max_tool_rounds
+        self._hitl_hook = hitl_hook
+        self._reply: AgentReply[T] | None = None
+        self._send_stream: Any = None
+        self._recv_stream: Any = None
+        self._tg: Any = None
+
+    @property
+    def run_id(self) -> str:
+        """Run identifier correlating streamed TextEvents and the final AgentReply."""
+        return self._run_id
+
+    @property
+    def reply(self) -> AgentReply[T]:
+        """Return the completed AgentReply after iteration finishes."""
+        if self._reply is None:
+            raise RuntimeError("AgentStream has not finished yet")
+        return self._reply
+
+    async def __aenter__(self) -> Self:
+        send_stream, recv_stream = anyio.create_memory_object_stream[TextEvent](256)
+        self._send_stream = send_stream
+        self._recv_stream = recv_stream
+        self._tg = anyio.create_task_group()
+        await self._tg.__aenter__()
+
+        async def _producer() -> None:
+            try:
+                self._reply = cast(
+                    AgentReply[T],
+                    await self._agent._run_turn(
+                        self._prompt,
+                        prior_history=self._messages or (),
+                        output_type=self._output_type,
+                        run_id=self._run_id,
+                        include_system=True,
+                        tools=self._tools,
+                        max_tool_rounds=self._max_tool_rounds,
+                        hitl_hook=self._hitl_hook,
+                        stream=True,
+                        _delta_sink=send_stream,
+                    ),
+                )
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await send_stream.aclose()
+
+        self._tg.start_soon(_producer)
+        return self
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> TextEvent:
+        assert self._recv_stream is not None
+        try:
+            return cast(TextEvent, await self._recv_stream.receive())
+        except anyio.EndOfStream as exc:
+            raise StopAsyncIteration from exc
+
+    async def __aexit__(self, *args: object) -> None:
+        if self._tg is not None:
+            self._tg.cancel_scope.cancel()
+            await self._tg.__aexit__(*args)
+        if self._recv_stream is not None:
+            with anyio.CancelScope(shield=True):
+                await self._recv_stream.aclose()
 
 
 class Agent:
@@ -166,6 +262,7 @@ class Agent:
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
     ) -> AgentReply[T]: ...
 
     @overload
@@ -179,6 +276,7 @@ class Agent:
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
     ) -> AgentReply[Any]: ...
 
     async def ask(
@@ -191,6 +289,7 @@ class Agent:
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
     ) -> AgentReply[Any]:
         """Send a prompt to the agent and await its typed AgentReply."""
         return await self._run_turn(
@@ -199,6 +298,56 @@ class Agent:
             output_type=output_type,
             run_id=run_id,
             include_system=True,
+            tools=tools,
+            max_tool_rounds=max_tool_rounds,
+            hitl_hook=hitl_hook,
+            stream=stream,
+        )
+
+    @overload
+    def stream_ask(
+        self,
+        prompt: str | ChatMessage,
+        *,
+        messages: Sequence[ChatMessage] | None = None,
+        output_type: type[T],
+        run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
+    ) -> AgentStream[T]: ...
+
+    @overload
+    def stream_ask(
+        self,
+        prompt: str | ChatMessage,
+        *,
+        messages: Sequence[ChatMessage] | None = None,
+        output_type: None = None,
+        run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
+    ) -> AgentStream[Any]: ...
+
+    def stream_ask(
+        self,
+        prompt: str | ChatMessage,
+        *,
+        messages: Sequence[ChatMessage] | None = None,
+        output_type: type[Any] | None = None,
+        run_id: str | None = None,
+        tools: Sequence[Tool] | None = None,
+        max_tool_rounds: int | None = None,
+        hitl_hook: HITLHook | HITLCallable | None = None,
+    ) -> AgentStream[Any]:
+        """Return an async-iterable AgentStream yielding live TextEvent(delta=True) tokens."""
+        return AgentStream(
+            self,
+            prompt,
+            messages=messages,
+            output_type=output_type,
+            run_id=run_id,
             tools=tools,
             max_tool_rounds=max_tool_rounds,
             hitl_hook=hitl_hook,
@@ -215,6 +364,8 @@ class Agent:
         tools: Sequence[Tool] | None = None,
         max_tool_rounds: int | None = None,
         hitl_hook: HITLHook | HITLCallable | None = None,
+        stream: bool = False,
+        _delta_sink: Any = None,
     ) -> AgentReply[Any]:
         effective_run_id = run_id or uuid4().hex
         target_type = output_type if output_type is not None else self.default_output_type
@@ -270,11 +421,38 @@ class Agent:
                 for mw in self.middleware:
                     request_messages = await mw.transform(request_messages, turn_context)
                 try:
-                    model_response = await self._client.complete(
-                        request_messages,
-                        tools=tool_specs,
-                        response_format=response_format,
-                    )
+                    if stream:
+                        streamed_resp: ModelResponse | None = None
+                        async for chunk in stream_model_response(
+                            self._client,
+                            request_messages,
+                            tools=tool_specs,
+                            response_format=response_format,
+                        ):
+                            if chunk.text_delta:
+                                delta_ev = TextEvent(
+                                    text=chunk.text_delta,
+                                    delta=True,
+                                    role="assistant",
+                                    source=self.name,
+                                    run_id=effective_run_id,
+                                )
+                                await self.stream.emit(delta_ev)
+                                if _delta_sink is not None:
+                                    await _delta_sink.send(delta_ev)
+                            if chunk.response is not None:
+                                streamed_resp = chunk.response
+                        if streamed_resp is None:
+                            raise ProviderError(
+                                "Streaming ModelClient ended without yielding final ModelResponse"
+                            )
+                        model_response = streamed_resp
+                    else:
+                        model_response = await self._client.complete(
+                            request_messages,
+                            tools=tool_specs,
+                            response_format=response_format,
+                        )
                 except Exception as exc:
                     await self._emit_error(exc, effective_run_id)
                     raise

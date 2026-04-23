@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Self, cast
 
@@ -24,6 +24,7 @@ from ag2.providers.base import (
     ProviderError,
     ResponseFormat,
     RetryableProviderError,
+    StreamChunk,
     ToolSpec,
 )
 
@@ -273,6 +274,95 @@ class AnthropicClient:
             model=cast(str, getattr(response, "model", None) or self.config.model),
             finish_reason=getattr(response, "stop_reason", None),
             raw=response,
+        )
+
+    async def stream_complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        response_format: ResponseFormat | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream Anthropic text deltas and yield the final assembled ModelResponse."""
+        anthropic_mod = self._anthropic
+        system_prompt, anthropic_messages = _to_anthropic_messages(messages)
+        kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "messages": anthropic_messages,
+        }
+        if system_prompt is not None:
+            kwargs["system"] = system_prompt
+        extra_body: dict[str, Any] = dict(self.config.extra_body)
+        if self.config.temperature is not None:
+            extra_body["temperature"] = self.config.temperature
+        if self.config.top_k is not None:
+            extra_body["top_k"] = self.config.top_k
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if tools:
+            kwargs["tools"] = [_to_anthropic_tool(t) for t in tools]
+        if response_format is not None:
+            kwargs["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": response_format.json_schema,
+                }
+            }
+
+        with tracer.start_as_current_span(
+            "ag2.provider.anthropic.stream_complete",
+            attributes={"gen_ai.request.model": self.config.model},
+        ):
+            try:
+                async with self._client.messages.stream(**kwargs) as msg_stream:
+                    async for event in msg_stream:
+                        if getattr(event, "type", None) == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if getattr(delta, "type", None) == "text_delta":
+                                delta_text = getattr(delta, "text", None)
+                                if delta_text:
+                                    yield StreamChunk(text_delta=str(delta_text))
+                    final_msg = await msg_stream.get_final_message()
+            except anthropic_mod.AnthropicError as exc:
+                raise ProviderError(f"Anthropic stream request failed: {exc}") from exc
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for block in getattr(final_msg, "content", ()):
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text_parts.append(str(getattr(block, "text", "")))
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=str(getattr(block, "id", "")),
+                        name=str(getattr(block, "name", "")),
+                        arguments=_parse_tool_input(
+                            getattr(block, "input", {}),
+                            str(getattr(block, "name", "")),
+                        ),
+                    )
+                )
+        usage_obj = getattr(final_msg, "usage", None)
+        if usage_obj is not None:
+            pt = int(getattr(usage_obj, "input_tokens", 0) or 0)
+            ct = int(getattr(usage_obj, "output_tokens", 0) or 0)
+            usage = Usage(prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct)
+        else:
+            usage = Usage()
+        yield StreamChunk(
+            response=ModelResponse(
+                message=ChatMessage(
+                    role="assistant",
+                    content="".join(text_parts) if text_parts else None,
+                    tool_calls=tool_calls,
+                ),
+                usage=usage,
+                model=cast(str, getattr(final_msg, "model", None) or self.config.model),
+                finish_reason=getattr(final_msg, "stop_reason", None),
+                raw=final_msg,
+            )
         )
 
     async def aclose(self) -> None:

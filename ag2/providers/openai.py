@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Self, cast
 
@@ -25,6 +25,7 @@ from ag2.providers.base import (
     ProviderError,
     ResponseFormat,
     RetryableProviderError,
+    StreamChunk,
     ToolSpec,
 )
 
@@ -133,22 +134,13 @@ class OpenAICompletionsClient:
             except openai_mod.OpenAIError as exc:
                 raise ProviderError(f"Failed to initialize OpenAI client: {exc}") from exc
 
-    async def complete(
+    def _build_kwargs(
         self,
         messages: Sequence[ChatMessage],
         *,
-        tools: Sequence[ToolSpec] = (),
-        response_format: ResponseFormat | None = None,
-    ) -> ModelResponse:
-        """Run an async chat completion request with configured retries."""
-        openai_mod = self._openai
-        retryable_errors: tuple[type[Exception], ...] = (
-            openai_mod.APIConnectionError,
-            openai_mod.APITimeoutError,
-            openai_mod.RateLimitError,
-            openai_mod.InternalServerError,
-        )
-
+        tools: Sequence[ToolSpec],
+        response_format: ResponseFormat | None,
+    ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": [_to_openai_message(m) for m in messages],
@@ -174,6 +166,24 @@ class OpenAICompletionsClient:
             }
         if self.config.extra_body:
             kwargs["extra_body"] = self.config.extra_body
+        return kwargs
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        response_format: ResponseFormat | None = None,
+    ) -> ModelResponse:
+        """Run an async chat completion request with configured retries."""
+        openai_mod = self._openai
+        retryable_errors: tuple[type[Exception], ...] = (
+            openai_mod.APIConnectionError,
+            openai_mod.APITimeoutError,
+            openai_mod.RateLimitError,
+            openai_mod.InternalServerError,
+        )
+        kwargs = self._build_kwargs(messages, tools=tools, response_format=response_format)
 
         with tracer.start_as_current_span(
             "ag2.provider.openai.complete",
@@ -240,6 +250,112 @@ class OpenAICompletionsClient:
             finish_reason=choice.finish_reason,
             raw=completion,
         )
+
+    async def stream_complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        response_format: ResponseFormat | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream OpenAI chat completion deltas followed by a final ModelResponse chunk."""
+        openai_mod = self._openai
+        retryable_errors: tuple[type[Exception], ...] = (
+            openai_mod.APIConnectionError,
+            openai_mod.APITimeoutError,
+            openai_mod.RateLimitError,
+            openai_mod.InternalServerError,
+        )
+        kwargs = self._build_kwargs(messages, tools=tools, response_format=response_format)
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+
+        with tracer.start_as_current_span(
+            "ag2.provider.openai.stream_complete",
+            attributes={"gen_ai.request.model": self.config.model},
+        ):
+            retrying = AsyncRetrying(
+                stop=stop_after_attempt(self.config.max_retries + 1),
+                wait=wait_exponential_jitter(initial=0.05, max=2.0),
+                retry=retry_if_exception_type(retryable_errors),
+                reraise=True,
+            )
+            try:
+                async for attempt in retrying:
+                    with attempt:
+                        stream = await self._client.chat.completions.create(**kwargs)
+            except retryable_errors as exc:
+                raise RetryableProviderError(
+                    f"OpenAI stream request failed after retries: {exc}"
+                ) from exc
+            except openai_mod.OpenAIError as exc:
+                raise ProviderError(f"OpenAI stream request failed: {exc}") from exc
+
+            text_parts: list[str] = []
+            tool_acc: dict[int, dict[str, Any]] = {}
+            usage = Usage()
+            model_name = self.config.model
+            finish_reason: str | None = None
+
+            try:
+                async for chunk in stream:
+                    if getattr(chunk, "model", None):
+                        model_name = str(chunk.model)
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage is not None:
+                        usage = Usage(
+                            prompt_tokens=int(chunk_usage.prompt_tokens or 0),
+                            completion_tokens=int(chunk_usage.completion_tokens or 0),
+                            total_tokens=int(chunk_usage.total_tokens or 0),
+                        )
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if getattr(choice, "finish_reason", None) is not None:
+                        finish_reason = str(choice.finish_reason)
+                    delta = getattr(choice, "delta", None)
+                    if delta is None:
+                        continue
+                    delta_text = getattr(delta, "content", None)
+                    if delta_text:
+                        text_parts.append(delta_text)
+                        yield StreamChunk(text_delta=delta_text)
+
+                    for tc_delta in getattr(delta, "tool_calls", None) or ():
+                        idx = int(getattr(tc_delta, "index", 0))
+                        entry = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": []})
+                        if getattr(tc_delta, "id", None):
+                            entry["id"] = str(tc_delta.id)
+                        fn_delta = getattr(tc_delta, "function", None)
+                        if fn_delta is not None:
+                            if getattr(fn_delta, "name", None):
+                                entry["name"] = str(fn_delta.name)
+                            if getattr(fn_delta, "arguments", None):
+                                entry["arguments"].append(str(fn_delta.arguments))
+            except openai_mod.OpenAIError as exc:
+                raise ProviderError(f"OpenAI stream interrupted: {exc}") from exc
+
+            parsed_calls = [
+                ToolCall(
+                    id=entry["id"] or f"call_{idx}",
+                    name=entry["name"],
+                    arguments=_parse_tool_arguments("".join(entry["arguments"]), entry["name"]),
+                )
+                for idx, entry in sorted(tool_acc.items())
+            ]
+            yield StreamChunk(
+                response=ModelResponse(
+                    message=ChatMessage(
+                        role="assistant",
+                        content="".join(text_parts) if text_parts else None,
+                        tool_calls=parsed_calls,
+                    ),
+                    usage=usage,
+                    model=model_name,
+                    finish_reason=finish_reason,
+                )
+            )
 
     async def aclose(self) -> None:
         """Close the underlying AsyncOpenAI client if owned by this adapter."""
