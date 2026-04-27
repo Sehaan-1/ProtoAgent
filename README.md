@@ -193,6 +193,12 @@ print(cap.span_names)  # ['ag2.agent.ask', ...]
 
 See [`examples/`](examples/):
 
+- [`examples/live_demo.py`](examples/live_demo.py) — **Real-LLM end-to-end showcase** (streaming + `@tool` calls, Pydantic `output_type`, `KnowledgePlugin` + `AssemblerMiddleware`, and `Hub` + `WorkflowChannel` + `AsyncWAL` + `SpanCapture`). Auto-detects `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or runs locally via `--provider ollama`:
+  ```bash
+  uv run python examples/live_demo.py
+  # or with local Ollama:
+  uv run python examples/live_demo.py --provider ollama --model llama3.2
+  ```
 - [`examples/quickstart.py`](examples/quickstart.py) — `Agent.ask()` and `reply.ask()`
 - [`examples/multi_provider.py`](examples/multi_provider.py) — Concurrent `AnthropicConfig` + `GeminiConfig`
 - [`examples/streaming_agent.py`](examples/streaming_agent.py) — `Agent.stream_ask()` token streaming
@@ -207,6 +213,9 @@ See [`examples/`](examples/):
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy ag2 test
+uv run mypy ag2 test examples
 uv run pytest -v
+
+# Opt-in live API integration tests (uses configured provider env key)
+uv run pytest -m live -v -s
 ```

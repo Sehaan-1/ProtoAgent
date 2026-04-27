@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, Generic, Self, TypeVar, cast, overload
 from uuid import uuid4
 
@@ -143,6 +144,7 @@ class AgentStream(Generic[T]):
         self._max_tool_rounds = max_tool_rounds
         self._hitl_hook = hitl_hook
         self._reply: AgentReply[T] | None = None
+        self._error: BaseException | None = None
         self._send_stream: Any = None
         self._recv_stream: Any = None
         self._tg: Any = None
@@ -155,6 +157,8 @@ class AgentStream(Generic[T]):
     @property
     def reply(self) -> AgentReply[T]:
         """Return the completed AgentReply after iteration finishes."""
+        if self._error is not None:
+            raise self._error
         if self._reply is None:
             raise RuntimeError("AgentStream has not finished yet")
         return self._reply
@@ -183,6 +187,10 @@ class AgentStream(Generic[T]):
                         _delta_sink=send_stream,
                     ),
                 )
+            except BaseException as exc:
+                if isinstance(exc, anyio.get_cancelled_exc_class()):
+                    raise
+                self._error = exc
             finally:
                 with anyio.CancelScope(shield=True):
                     await send_stream.aclose()
@@ -198,15 +206,34 @@ class AgentStream(Generic[T]):
         try:
             return cast(TextEvent, await self._recv_stream.receive())
         except anyio.EndOfStream as exc:
+            if self._error is not None:
+                raise self._error from None
             raise StopAsyncIteration from exc
 
-    async def __aexit__(self, *args: object) -> None:
-        if self._tg is not None:
-            self._tg.cancel_scope.cancel()
-            await self._tg.__aexit__(*args)
-        if self._recv_stream is not None:
-            with anyio.CancelScope(shield=True):
-                await self._recv_stream.aclose()
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
+        try:
+            if self._tg is not None:
+                self._tg.cancel_scope.cancel()
+                try:
+                    await self._tg.__aexit__(exc_type, exc_val, exc_tb)
+                except BaseExceptionGroup as eg:
+                    if (
+                        exc_val is not None
+                        and len(eg.exceptions) == 1
+                        and eg.exceptions[0] is exc_val
+                    ):
+                        return False
+                    raise
+        finally:
+            if self._recv_stream is not None:
+                with anyio.CancelScope(shield=True):
+                    await self._recv_stream.aclose()
+        return None
 
 
 class Agent:

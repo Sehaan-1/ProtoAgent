@@ -204,3 +204,12 @@ async def test_agent_cancellation_during_model_call() -> None:
         with anyio.move_on_after(0.05) as scope:
             await agent.ask("wait")
         assert scope.cancelled_caught is True
+
+
+async def test_agent_stream_ask_propagates_provider_error_cleanly() -> None:
+    client = _FakeModelClient([ProviderError("stream upstream failure")])
+    async with Agent(name="stream-err", model=client) as agent:
+        with pytest.raises(ProviderError, match="stream upstream failure"):
+            async with agent.stream_ask("fail during stream") as stream:
+                async for _ in stream:
+                    pass
