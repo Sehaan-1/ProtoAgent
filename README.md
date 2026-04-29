@@ -1,221 +1,105 @@
-# AG2 (ProtoAgent)
+# ProtoAgent
 
-Clean, async-first, protocol-driven multi-agent framework built around the modern `import ag2` (v1.x) architecture.
+[![CI](https://github.com/Sehaan-1/ProtoAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/Sehaan-1/ProtoAgent/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Typed](https://img.shields.io/badge/typing-strict%20mypy-informational.svg)](pyproject.toml)
+[![Linted with Ruff](https://img.shields.io/badge/lint-ruff-261230.svg)](https://docs.astral.sh/ruff/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](pyproject.toml)
 
-## Highlights
+ProtoAgent is an async Python framework for building single- and multi-agent LLM workflows. It handles provider adapters, parallel tool execution, human-in-the-loop approvals, MCP integrations, SQLite audit logs, and OpenTelemetry tracing on top of `anyio`.
 
-- **Async-first Agent loop** (`Agent.ask`, `Agent.stream_ask`, `AgentReply.ask`) built on `anyio` structured concurrency.
-- **Pluggable Model Providers**: `OpenAICompletionsClient`, `AnthropicClient`, and `GeminiClient` behind `ModelClient` / `StreamingModelClient` protocols, with retries (`tenacity`), structured output parsing (`ResponseFormat`), and incremental streaming (`StreamChunk`).
-- **Typed Tools & Concurrent Execution**: `@tool` decorator with automatic JSON schema inference from Python type hints and parallel tool-call execution.
-- **Human-in-the-Loop (HITL)**: Injected `Context` with `HITLHook` adapters (`CallbackHITLHook`, `QueueHITLHook`, `CLIHITLHook`).
-- **Model Context Protocol (MCP)**: `MCPSession`, `MCPToolAdapter`, and `load_mcp_tools()` over stdio and HTTP transports.
-- **Multi-Agent Networking**: `Hub` registry, SQLite-backed `AsyncWAL` audit log, typed channels (`conversation`, `consulting`, `discussion`), and declarative `WorkflowChannel` (`TransitionGraph` + `END` sentinel).
-- **Agent Harness**: `MemoryKnowledgeStore` / `DiskKnowledgeStore`, `KnowledgePlugin`, `CompactTrigger` (`TailWindowCompact`, `SummarizeCompact`), and `AssemblerMiddleware` / `WorkingMemoryPolicy`.
-- **Observability**: `MemoryStream` pub/sub event bus (`MessageEvent`, `TextEvent`, `ToolCallEvent`, `ToolResultEvent`, `ErrorEvent`) plus OpenTelemetry & `structlog` helpers (`configure_telemetry`, `SpanCapture`).
-
----
+> [!TIP]
+> You can run the full live showcase against OpenRouter, OpenAI, Anthropic, Gemini, or a local Ollama server with `uv run python examples/live_demo.py`.
 
 ## Architecture
 
-```
-ag2/
-├── config/       # Pydantic v2 configs: OpenAICompletionsConfig, AnthropicConfig, GeminiConfig
-├── events/       # Immutable ChatMessage, Usage, ToolCall, typed events, MemoryStream
-├── providers/    # ModelClient, StreamingModelClient, OpenAI / Anthropic / Gemini adapters
-├── tools/        # @tool decorator, schema extraction, Tool execution & serialization
-├── hitl/         # Context, HITLHook, CallbackHITLHook, QueueHITLHook, CLIHITLHook
-├── mcp/          # MCPSession, MCPStdioConfig, MCPHttpConfig, MCPToolAdapter, load_mcp_tools
-├── knowledge/    # KnowledgeStore (Memory & Disk), KnowledgePlugin retrieval tools
-├── compact/      # CompactTrigger, TailWindowCompact, SummarizeCompact, token estimation
-├── middleware/   # MessageMiddleware protocol, WorkingMemoryPolicy, AssemblerMiddleware
-├── agent/        # Agent, AgentReply, AgentStream
-├── network/      # Hub, AsyncWAL, Conversation/Consulting/Discussion/Workflow channels
-└── telemetry/    # configure_telemetry, get_tracer, get_meter, SpanCapture
+```mermaid
+flowchart LR
+    User["Caller / App"] --> Agent["Agent Loop (ask / stream_ask)"]
+    Agent --> MW["Middleware (Knowledge + Compaction)"]
+    MW --> Providers["Providers (OpenAI / Anthropic / Gemini / Ollama)"]
+    Agent --> Actions["Tools + HITL Hooks + MCP Clients"]
+    Hub["Multi-Agent Hub"] --> Channels["Channels (Conversation / Consulting / Discussion / Workflow)"]
+    Channels --> Agent
+    Hub --> WAL["SQLite AsyncWAL"]
+    Agent --> Obs["MemoryStream + OpenTelemetry"]
 ```
 
-Dependency boundaries are enforced in tests so lower layers (`events`, `config`, `knowledge`, `compact`, `middleware`, `telemetry`) stay decoupled from `agent`, `mcp`, and `network`.
+<details>
+<summary>Package layout (12 modules with test-enforced dependency boundaries)</summary>
 
----
+| Module | Purpose |
+| --- | --- |
+| `config/` | Pydantic provider configs and environment key lookup |
+| `events/` | Chat message models, usage stats, and `MemoryStream` pub/sub |
+| `providers/` | `ModelClient` and streaming adapters for OpenAI, Anthropic, Gemini |
+| `tools/` | `@tool` decorator, JSON schema generation, concurrent execution |
+| `hitl/` | Injected `Context` and callback, queue, or CLI human approval hooks |
+| `mcp/` | MCP stdio and HTTP client sessions and tool wrappers |
+| `knowledge/` | In-memory and JSON-backed knowledge stores and retrieval tools |
+| `compact/` | History compaction triggers and window/summary compactors |
+| `middleware/` | Pre-request message assembly and working-memory policies |
+| `agent/` | Turn loop, multi-turn `AgentReply`, and `AgentStream` |
+| `network/` | `Hub` registry, `AsyncWAL`, channels, and `TransitionGraph` workflows |
+| `telemetry/` | OpenTelemetry, `structlog` JSON setup, and in-memory `SpanCapture` |
 
-## Installation
+</details>
+
+## Setup
 
 Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-# Clone and install dev dependencies
+# Install dev dependencies
 uv sync --locked --dev
+
+# Or include all optional provider/MCP/telemetry extras
+uv sync --all-extras
 ```
 
-Install optional provider or integration extras when packaging or installing selectively:
+Set at least one provider API key when running live model calls (or use local Ollama without a key):
+
+- `OPENROUTER_API_KEY`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+
+## How to Use
+
+### 1. Run the live showcase
+
+`examples/live_demo.py` detects whichever key is set in your environment and runs streaming tool calls, Pydantic structured output, knowledge middleware, and a multi-agent workflow with WAL + OpenTelemetry spans:
 
 ```bash
-pip install "ag2[openai]"
-pip install "ag2[anthropic,gemini]"
-pip install "ag2[mcp,storage,telemetry]"
-# Or install everything:
-pip install "ag2[all]"
+uv run python examples/live_demo.py
+
+# Pick a specific scenario or provider
+uv run python examples/live_demo.py --scenario tools
+uv run python examples/live_demo.py --provider ollama --model llama3.2
 ```
 
-Set provider API keys as environment variables (or pass `SecretStr` via `api_key`):
-- OpenAI: `OPENAI_API_KEY`
-- Anthropic: `ANTHROPIC_API_KEY`
-- Gemini: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+### 2. Explore focused examples
 
----
+Each script in [`examples/`](examples/) isolates one part of the framework:
 
-## Quickstart
+- [`examples/quickstart.py`](examples/quickstart.py): basic turn and follow-up continuation
+- [`examples/multi_provider.py`](examples/multi_provider.py): concurrent Anthropic and Gemini calls
+- [`examples/streaming_agent.py`](examples/streaming_agent.py): token streaming with `stream_ask()`
+- [`examples/multi_agent_workflow.py`](examples/multi_agent_workflow.py): graph workflow inside `Hub`
+- [`examples/knowledge_agent.py`](examples/knowledge_agent.py): knowledge retrieval and middleware injection
+- [`examples/telemetry_demo.py`](examples/telemetry_demo.py): self-contained `SpanCapture` demo (no API key needed)
 
-### Basic Agent & Multi-Turn Continuation
-
-```python
-import asyncio
-from ag2 import Agent, OpenAICompletionsConfig
-
-
-async def main() -> None:
-    config = OpenAICompletionsConfig(model="gpt-4o-mini")
-    async with Agent(
-        name="assistant",
-        model=config,
-        system_message="You are a concise assistant.",
-    ) as agent:
-        reply = await agent.ask("What is the capital of France?")
-        print(reply.text)
-
-        follow_up = await reply.ask("What river runs through it?")
-        print(follow_up.text)
-
-
-asyncio.run(main())
-```
-
-### Streaming Responses
-
-```python
-async with agent.stream_ask("Write a short haiku.") as stream:
-    async for event in stream:
-        print(event.text, end="", flush=True)
-    reply = stream.reply
-```
-
-### Typed Tools & Structured Output
-
-```python
-from pydantic import BaseModel
-from ag2 import Agent, OpenAICompletionsConfig, tool
-
-
-class WeatherReport(BaseModel):
-    city: str
-    summary: str
-
-
-@tool
-async def get_temperature(city: str) -> str:
-    """Return the current temperature for a city."""
-    return f"22C in {city}"
-
-
-async with Agent(
-    name="weather",
-    model=OpenAICompletionsConfig(model="gpt-4o-mini"),
-    tools=[get_temperature],
-) as agent:
-    reply = await agent.ask(
-        "What is the weather in Paris?",
-        output_type=WeatherReport,
-    )
-    print(reply.output)  # WeatherReport instance
-```
-
-### Multi-Agent Workflow (`Hub` + `TransitionGraph`)
-
-```python
-from ag2 import END, Agent, Hub, OpenAICompletionsConfig, TransitionGraph, workflow
-
-model = OpenAICompletionsConfig(model="gpt-4o-mini")
-graph = (
-    TransitionGraph().set_entry("drafter").add_edge("drafter", "reviewer").add_edge("reviewer", END)
-)
-
-async with Hub(close_agents=True) as hub:
-    hub.register(Agent(name="drafter", model=model, system_message="Draft text."))
-    hub.register(Agent(name="reviewer", model=model, system_message="Polish text."))
-    result = await workflow(hub, graph, "Explain async/await concisely.")
-    print(result.final_text)
-```
-
-### Knowledge + Working-Memory Middleware
-
-```python
-from ag2 import (
-    Agent,
-    AssemblerMiddleware,
-    KnowledgePlugin,
-    MemoryKnowledgeStore,
-    OpenAICompletionsConfig,
-    WorkingMemoryPolicy,
-)
-
-store = MemoryKnowledgeStore()
-kb = KnowledgePlugin(store)
-await kb.remember("AG2 emits typed events on MemoryStream.", title="Events")
-
-assembler = AssemblerMiddleware(
-    knowledge=kb,
-    working_memory=WorkingMemoryPolicy(max_messages=20, preserve_recent=6),
-)
-async with Agent(
-    name="kb-agent",
-    model=OpenAICompletionsConfig(model="gpt-4o-mini"),
-    tools=kb.tools(),
-    middleware=[assembler],
-) as agent:
-    reply = await agent.ask("How does AG2 emit events?")
-```
-
-### Telemetry & Observability
-
-```python
-from ag2 import SpanCapture, configure_telemetry
-
-configure_telemetry("my-ag2-service", log_level="INFO")
-
-with SpanCapture() as cap:
-    reply = await agent.ask("Hello!")
-
-print(cap.span_names)  # ['ag2.agent.ask', ...]
-```
-
----
-
-## Runnable Examples
-
-See [`examples/`](examples/):
-
-- [`examples/live_demo.py`](examples/live_demo.py) — **Real-LLM end-to-end showcase** (streaming + `@tool` calls, Pydantic `output_type`, `KnowledgePlugin` + `AssemblerMiddleware`, and `Hub` + `WorkflowChannel` + `AsyncWAL` + `SpanCapture`). Auto-detects `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or runs locally via `--provider ollama`:
-  ```bash
-  uv run python examples/live_demo.py
-  # or with local Ollama:
-  uv run python examples/live_demo.py --provider ollama --model llama3.2
-  ```
-- [`examples/quickstart.py`](examples/quickstart.py) — `Agent.ask()` and `reply.ask()`
-- [`examples/multi_provider.py`](examples/multi_provider.py) — Concurrent `AnthropicConfig` + `GeminiConfig`
-- [`examples/streaming_agent.py`](examples/streaming_agent.py) — `Agent.stream_ask()` token streaming
-- [`examples/multi_agent_workflow.py`](examples/multi_agent_workflow.py) — `Hub` + `TransitionGraph` + `workflow()`
-- [`examples/knowledge_agent.py`](examples/knowledge_agent.py) — `MemoryKnowledgeStore` + `KnowledgePlugin` + `AssemblerMiddleware`
-- [`examples/telemetry_demo.py`](examples/telemetry_demo.py) — Self-contained telemetry & `SpanCapture` demo (no API key needed)
-
----
-
-## Development Checks
+### 3. Run checks and tests
 
 ```bash
+# Run lint, format check, strict mypy, and offline tests
+just check
+
+# Or run checks individually
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy ag2 test examples
 uv run pytest -v
 
-# Opt-in live API integration tests (uses configured provider env key)
+# Run opt-in live API integration tests
 uv run pytest -m live -v -s
 ```
