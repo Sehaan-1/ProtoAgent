@@ -6,20 +6,28 @@
 [![Linted with Ruff](https://img.shields.io/badge/lint-ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](pyproject.toml)
 
-ProtoAgent is an async Python framework for building single- and multi-agent LLM workflows. It handles provider adapters, parallel tool execution, human-in-the-loop approvals, MCP integrations, SQLite audit logs, and OpenTelemetry tracing on top of `anyio`.
+ProtoAgent is a Python multi-agent framework built around asynchronous programming (`anyio` and `asyncio`) and AutoGen-style agent coordination. It pairs typed tool calling, human-in-the-loop (HITL) approval hooks, and Model Context Protocol (MCP) connections with multi-agent workflows, SQLite audit logging, and OpenTelemetry tracing.
 
 > [!TIP]
-> You can run the full live showcase against OpenRouter, OpenAI, Anthropic, Gemini, or a local Ollama server with `uv run python examples/live_demo.py`.
+> Run the full live showcase against OpenRouter, OpenAI, Anthropic, Gemini, or local Ollama with `uv run python examples/live_demo.py`.
+
+## Core Capabilities
+
+- **Asynchronous execution**: `Agent.ask()` and `Agent.stream_ask()` handle multi-turn state, streaming tokens, and structured cancellation on `anyio`.
+- **AutoGen-style agent coordination**: `Hub` manages agent registries, conversation/consulting/discussion channels, conditional `TransitionGraph` multi-agent workflows, and a SQLite `AsyncWAL`.
+- **Tool calling**: `@tool` turns typed Python functions into validated JSON schemas and runs tool calls concurrently per model round.
+- **Human-in-the-loop workflows**: Tools receive an injected `Context` to pause and ask humans via callback, async queue, or CLI hooks.
+- **MCP support**: `MCPSession` connects agents to external MCP servers over stdio and HTTP for tool and resource discovery.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    User["Caller / App"] --> Agent["Agent Loop (ask / stream_ask)"]
+    Caller["Caller / App"] --> Agent["Async Agent Loop (ask / stream_ask)"]
     Agent --> MW["Middleware (Knowledge + Compaction)"]
-    MW --> Providers["Providers (OpenAI / Anthropic / Gemini / Ollama)"]
-    Agent --> Actions["Tools + HITL Hooks + MCP Clients"]
-    Hub["Multi-Agent Hub"] --> Channels["Channels (Conversation / Consulting / Discussion / Workflow)"]
+    MW --> Providers["LLM Providers (OpenAI / Anthropic / Gemini / Ollama)"]
+    Agent --> Actions["Concurrent Tool Calling + HITL Hooks + MCP Clients"]
+    Hub["Multi-Agent Hub"] --> Channels["Workflows & Channels (Conversation / Consulting / Discussion / Graph)"]
     Channels --> Agent
     Hub --> WAL["SQLite AsyncWAL"]
     Agent --> Obs["MemoryStream + OpenTelemetry"]
@@ -32,10 +40,10 @@ flowchart LR
 | --- | --- |
 | `config/` | Pydantic provider configs and environment key lookup |
 | `events/` | Chat message models, usage stats, and `MemoryStream` pub/sub |
-| `providers/` | `ModelClient` and streaming adapters for OpenAI, Anthropic, Gemini |
-| `tools/` | `@tool` decorator, JSON schema generation, concurrent execution |
-| `hitl/` | Injected `Context` and callback, queue, or CLI human approval hooks |
-| `mcp/` | MCP stdio and HTTP client sessions and tool wrappers |
+| `providers/` | Async and streaming clients for OpenAI, Anthropic, and Gemini |
+| `tools/` | `@tool` decorator, schema validation, and parallel tool calling |
+| `hitl/` | Injected `Context` and callback, queue, or CLI human-in-the-loop hooks |
+| `mcp/` | MCP stdio/HTTP client sessions and native tool wrappers |
 | `knowledge/` | In-memory and JSON-backed knowledge stores and retrieval tools |
 | `compact/` | History compaction triggers and window/summary compactors |
 | `middleware/` | Pre-request message assembly and working-memory policies |
@@ -53,7 +61,7 @@ Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/).
 # Install dev dependencies
 uv sync --locked --dev
 
-# Or include all optional provider/MCP/telemetry extras
+# Or include all optional provider, MCP, storage, and telemetry extras
 uv sync --all-extras
 ```
 
@@ -73,19 +81,19 @@ Set at least one provider API key when running live model calls (or use local Ol
 ```bash
 uv run python examples/live_demo.py
 
-# Pick a specific scenario or provider
+# Pick a specific scenario or local Ollama model
 uv run python examples/live_demo.py --scenario tools
 uv run python examples/live_demo.py --provider ollama --model llama3.2
 ```
 
 ### 2. Explore focused examples
 
-Each script in [`examples/`](examples/) isolates one part of the framework:
+Each script in [`examples/`](examples/) isolates one capability:
 
 - [`examples/quickstart.py`](examples/quickstart.py): basic turn and follow-up continuation
 - [`examples/multi_provider.py`](examples/multi_provider.py): concurrent Anthropic and Gemini calls
 - [`examples/streaming_agent.py`](examples/streaming_agent.py): token streaming with `stream_ask()`
-- [`examples/multi_agent_workflow.py`](examples/multi_agent_workflow.py): graph workflow inside `Hub`
+- [`examples/multi_agent_workflow.py`](examples/multi_agent_workflow.py): multi-agent workflow inside `Hub`
 - [`examples/knowledge_agent.py`](examples/knowledge_agent.py): knowledge retrieval and middleware injection
 - [`examples/telemetry_demo.py`](examples/telemetry_demo.py): self-contained `SpanCapture` demo (no API key needed)
 
