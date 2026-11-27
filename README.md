@@ -17,6 +17,7 @@ ProtoAgent is a Python multi-agent framework built around asynchronous programmi
 - **AutoGen-style agent coordination**: `Hub` manages agent registries, conversation/consulting/discussion channels, conditional `TransitionGraph` multi-agent workflows, and a SQLite `AsyncWAL`.
 - **Tool calling**: `@tool` turns typed Python functions into validated JSON schemas and runs tool calls concurrently per model round.
 - **Human-in-the-loop workflows**: Tools receive an injected `Context` to pause and ask humans via callback, async queue, or CLI hooks.
+- **Risk-based tool firewall**: `ToolPolicy` and `guard_tools()` enforce allow, HITL confirm, and argument-level deny rules uniformly across native `@tool` functions and remote MCP tools.
 - **MCP support**: `MCPSession` connects agents to external MCP servers over stdio and HTTP for tool and resource discovery.
 
 ## Architecture
@@ -41,7 +42,7 @@ flowchart LR
 | `config/` | Pydantic provider configs and environment key lookup |
 | `events/` | Chat message models, usage stats, and `MemoryStream` pub/sub |
 | `providers/` | Async and streaming clients for OpenAI, Anthropic, and Gemini |
-| `tools/` | `@tool` decorator, schema validation, and parallel tool calling |
+| `tools/` | `@tool` decorator, schema validation, parallel tool calling, and `ToolPolicy` HITL guardrails |
 | `hitl/` | Injected `Context` and callback, queue, or CLI human-in-the-loop hooks |
 | `mcp/` | MCP stdio/HTTP client sessions and native tool wrappers |
 | `knowledge/` | In-memory and JSON-backed knowledge stores and retrieval tools |
@@ -95,6 +96,7 @@ Each script in [`examples/`](examples/) isolates one capability:
 - [`examples/streaming_agent.py`](examples/streaming_agent.py): token streaming with `stream_ask()`
 - [`examples/multi_agent_workflow.py`](examples/multi_agent_workflow.py): multi-agent workflow inside `Hub`
 - [`examples/knowledge_agent.py`](examples/knowledge_agent.py): knowledge retrieval and middleware injection
+- [`examples/mcp_hitl_guard.py`](examples/mcp_hitl_guard.py): risk-based HITL + MCP tool firewall demo over stdio MCP (no API key needed)
 - [`examples/telemetry_demo.py`](examples/telemetry_demo.py): self-contained `SpanCapture` demo (no API key needed)
 
 ### 3. Run checks and tests
