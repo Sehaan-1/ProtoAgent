@@ -4,7 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Typed](https://img.shields.io/badge/typing-strict%20mypy-informational.svg)](pyproject.toml)
 [![Linted with Ruff](https://img.shields.io/badge/lint-ruff-261230.svg)](https://docs.astral.sh/ruff/)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](pyproject.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ProtoAgent is a Python multi-agent framework built around asynchronous programming (`anyio` and `asyncio`) and AutoGen-style agent coordination. It pairs typed tool calling, human-in-the-loop (HITL) approval hooks, and Model Context Protocol (MCP) connections with multi-agent workflows, SQLite audit logging, and OpenTelemetry tracing.
 
@@ -111,3 +111,7 @@ uv run pytest -v
 # Run opt-in live API integration tests
 uv run pytest -m live -v -s
 ```
+
+## License
+
+Licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
